@@ -87,6 +87,11 @@ FEATURE_NAMES = [
     "strong_name_but_number_conflict",
     "candidate_is_s3",
     "candidate_rank",
+    "name_num_overlap",
+    "name_conflicting_digits",
+    "addr_jaro_winkler",
+    "name_length_diff",
+    "addr_length_diff",
 ]
 
 
@@ -215,6 +220,14 @@ def compute_features_for_pair(
     f_is_s3            = 1.0 if s23_id.startswith("S3-") else 0.0
     f_cand_rank        = float(cand_rank)
 
+    # Hard negative handling features
+    nd1, nd2             = _extract_digit_set(s1_name), _extract_digit_set(s23_name)
+    f_name_num_overlap   = _jaccard_numbers(s1_name, s23_name)
+    f_name_conflict_digits = 1.0 if (nd1 and nd2 and not (nd1 & nd2)) else 0.0
+    f_addr_jw            = _jaro_winkler(s1_addr, s23_addr)
+    f_name_len_diff      = float(abs(len(s1_name) - len(s23_name)))
+    f_addr_len_diff      = float(abs(len(s1_addr) - len(s23_addr)))
+
     return [
         f_name_ratio, f_name_token_sort, f_name_token_set,
         f_name_partial, f_name_jw, f_name_jaccard,
@@ -228,7 +241,10 @@ def compute_features_for_pair(
         f_name_x_addr, f_min_name_addr, f_max_name_addr,
         f_both_addr, f_missing_asym, f_exact_name,
         f_conflict_digits, f_strong_name_num, f_name_num_conflict,
-        f_is_s3, f_cand_rank
+        f_is_s3, f_cand_rank,
+        # Hard Negatives 5
+        f_name_num_overlap, f_name_conflict_digits,
+        f_addr_jw, f_name_len_diff, f_addr_len_diff
     ]
 
 
@@ -271,3 +287,4 @@ def build_lookup(df: pd.DataFrame) -> Dict:
         }
         for _, row in df.iterrows()
     }
+
