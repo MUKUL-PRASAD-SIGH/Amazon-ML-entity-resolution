@@ -57,7 +57,13 @@ for d in (REPORTS_DIR, ERROR_DIR, EXP_DIR):
 
 # ── Data Loading & Split ──────────────────────────────────────────────────────
 
-def load_and_preprocess_data(sample: int = 5000):
+def load_and_preprocess_data(sample: int = 5000, full_s23: bool = False):
+    cache_file = OUTPUT_DIR / f"preprocessed_cache_{sample}_{full_s23}.pkl"
+    if cache_file.exists():
+        logger.info(f"Loading preprocessed data from cache: {cache_file}")
+        with open(cache_file, "rb") as f:
+            return pickle.load(f)
+
     logger.info(f"Loading data (sample={sample})...")
     s1_raw = pd.read_csv(TRAIN_DIR / "train_source1.tsv", sep="\t", dtype=str)
     s2_raw = pd.read_csv(TRAIN_DIR / "train_source2.tsv", sep="\t", dtype=str)
@@ -85,8 +91,11 @@ def load_and_preprocess_data(sample: int = 5000):
             extra   = rest.iloc[rng.choice(len(rest), n_take, replace=False)]
             return pd.concat([gt_rows, extra], ignore_index=True)
 
-        s2_raw = _subsample(s2_raw, gt_s2_ids, sample * 5)
-        s3_raw = _subsample(s3_raw, gt_s3_ids, sample * 5)
+        if not full_s23:
+            s2_raw = _subsample(s2_raw, gt_s2_ids, sample * 5)
+            s3_raw = _subsample(s3_raw, gt_s3_ids, sample * 5)
+        else:
+            logger.info("Keeping FULL S2/S3 (Realistic blocking test)")
 
     s1 = preprocess_df(s1_raw)
     s2 = preprocess_df(s2_raw)
@@ -100,7 +109,10 @@ def load_and_preprocess_data(sample: int = 5000):
             m = row.get("matched_entity_ids", "").strip()
             gt_dict[sid] = [x for x in m.split(",") if x] if m else []
 
-    return s1, s2, s3, gt_dict
+    res = (s1, s2, s3, gt_dict)
+    with open(cache_file, "wb") as f:
+        pickle.dump(res, f)
+    return res
 
 
 def split_three_way(s1: pd.DataFrame, train_frac=0.70, val_frac=0.15):
@@ -240,11 +252,11 @@ def log_experiment_result(result_dict: dict):
 
 # ── Run Baseline Audit Experiment ──────────────────────────────────────────────
 
-def run_audit_experiment(sample=5000, k_candidates=50):
+def run_audit_experiment(sample=5000, k_candidates=50, full_s23=False):
     logger.info("=== Running Step 1 & 2 Audit & Baseline Experiment ===")
     t0 = time.time()
     
-    s1, s2, s3, gt_dict = load_and_preprocess_data(sample=sample)
+    s1, s2, s3, gt_dict = load_and_preprocess_data(sample=sample, full_s23=full_s23)
     s1_train, s1_val, s1_holdout = split_three_way(s1)
     
     logger.info(f"Splits: Train={len(s1_train)}, Val={len(s1_val)}, Holdout={len(s1_holdout)}")
@@ -256,9 +268,17 @@ def run_audit_experiment(sample=5000, k_candidates=50):
 
     # 1. Blocking
     logger.info("Running candidate blocking...")
-    cands_train = generate_candidates(s1_train, s2, s3, k=k_candidates)
-    cands_val   = generate_candidates(s1_val, s2, s3, k=k_candidates)
-    cands_hold  = generate_candidates(s1_holdout, s2, s3, k=k_candidates)
+    cands_cache_file = OUTPUT_DIR / f"cands_cache_{sample}_{full_s23}_{k_candidates}.pkl"
+    if cands_cache_file.exists():
+        logger.info(f"Loading candidates from cache: {cands_cache_file}")
+        with open(cands_cache_file, "rb") as f:
+            cands_train, cands_val, cands_hold = pickle.load(f)
+    else:
+        cands_train = generate_candidates(s1_train, s2, s3, k=k_candidates)
+        cands_val   = generate_candidates(s1_val, s2, s3, k=k_candidates)
+        cands_hold  = generate_candidates(s1_holdout, s2, s3, k=k_candidates)
+        with open(cands_cache_file, "wb") as f:
+            pickle.dump((cands_train, cands_val, cands_hold), f)
 
     gt_train = {k: v for k, v in gt_dict.items() if k in set(s1_train["entity_id"])}
     gt_val   = {k: v for k, v in gt_dict.items() if k in set(s1_val["entity_id"])}
@@ -269,14 +289,23 @@ def run_audit_experiment(sample=5000, k_candidates=50):
     val_pairs, val_labels     = build_pairs_with_missed(s1_val, cands_val, gt_val)
     hold_pairs, hold_labels   = build_pairs_with_missed(s1_holdout, cands_hold, gt_hold)
 
-    X_train = build_feature_matrix(train_pairs, s1_train_lookup, s23_lookup, n_jobs=-1)
-    y_train = np.array(train_labels, dtype=np.int32)
+    feat_cache_file = OUTPUT_DIR / f"features_cache_{sample}_{full_s23}_{k_candidates}.pkl"
+    if feat_cache_file.exists():
+        logger.info(f"Loading features from cache: {feat_cache_file}")
+        with open(feat_cache_file, "rb") as f:
+            X_train, y_train, X_val, y_val, X_hold, y_hold = pickle.load(f)
+    else:
+        X_train = build_feature_matrix(train_pairs, s1_train_lookup, s23_lookup, n_jobs=-1)
+        y_train = np.array(train_labels, dtype=np.int32)
 
-    X_val = build_feature_matrix(val_pairs, s1_val_lookup, s23_lookup, n_jobs=-1)
-    y_val = np.array(val_labels, dtype=np.int32)
+        X_val = build_feature_matrix(val_pairs, s1_val_lookup, s23_lookup, n_jobs=-1)
+        y_val = np.array(val_labels, dtype=np.int32)
 
-    X_hold = build_feature_matrix(hold_pairs, s1_hold_lookup, s23_lookup, n_jobs=-1)
-    y_hold = np.array(hold_labels, dtype=np.int32)
+        X_hold = build_feature_matrix(hold_pairs, s1_hold_lookup, s23_lookup, n_jobs=-1)
+        y_hold = np.array(hold_labels, dtype=np.int32)
+        
+        with open(feat_cache_file, "wb") as f:
+            pickle.dump((X_train, y_train, X_val, y_val, X_hold, y_hold), f)
 
     # 3. Train LightGBM
     dtrain = lgb.Dataset(X_train, label=y_train, feature_name=FEATURE_NAMES)
@@ -472,5 +501,10 @@ def save_top_features_report(fi_df: pd.DataFrame):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample", type=int, default=5000)
+    parser.add_argument("--full-s23", action="store_true", help="Do not sample S2/S3 (Realistic blocking test)")
     args = parser.parse_args()
-    run_audit_experiment(sample=args.sample)
+    
+    if args.sample == 50000 and args.full_s23:
+        logger.info("CRITICAL CHECKPOINT: Running 50K S1 against FULL 10M S2/S3")
+        
+    run_audit_experiment(sample=args.sample, full_s23=args.full_s23)
