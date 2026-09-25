@@ -1,45 +1,48 @@
 """
-features.py — Pair-level similarity features for the LightGBM classifier.
+features.py — Pair-level similarity & domain interaction features for LightGBM.
 
-For every (S1, S23) candidate pair we compute:
+Computes 28 similarity, domain interaction, digit conflict, and structural features per pair:
 
-  Name features (6)
-  -----------------
-  name_ratio          — Levenshtein ratio (rapidfuzz)
-  name_token_sort     — token-sort ratio   (handles word reorder)
-  name_token_set      — token-set ratio    (handles subset / extra words)
-  name_partial        — partial-string ratio (for abbreviations)
-  name_jaro_winkler   — Jaro-Winkler similarity
-  name_jaccard_token  — Jaccard of word-token sets
+Base Similarity Features (17)
+-----------------------------
+1. name_ratio          — Levenshtein ratio (rapidfuzz)
+2. name_token_sort     — token-sort ratio   (handles word reorder)
+3. name_token_set      — token-set ratio    (handles subset / extra words)
+4. name_partial        — partial-string ratio (for abbreviations)
+5. name_jaro_winkler   — Jaro-Winkler similarity
+6. name_jaccard_token  — Jaccard of word-token sets
+7. addr_ratio          — Levenshtein ratio
+8. addr_token_sort     — token-sort ratio
+9. addr_token_set      — token-set ratio
+10. addr_jaccard_token — Jaccard of word-token sets
+11. addr_num_overlap   — Jaccard of numeric-token sets (building/pin numbers)
+12. country_match      — 1 if country_norm identical, 0 otherwise
+13. blocking_score     — cosine similarity from TF-IDF blocking step
+14. name_len_s1        — len(name_norm) of S1 entity
+15. name_len_s23       — len(name_norm) of S23 entity
+16. name_len_ratio     — min/max of name lengths (0-1)
+17. addr_len_ratio     — min/max of addr_norm lengths (0-1)
 
-  Address features (5)
-  --------------------
-  addr_ratio          — Levenshtein ratio
-  addr_token_sort     — token-sort ratio
-  addr_token_set      — token-set ratio
-  addr_jaccard_token  — Jaccard of word-token sets
-  addr_num_overlap    — Jaccard of numeric-token sets (building/pin numbers)
+Advanced Interaction & Domain Features (11)
+--------------------------------------------
+18. name_x_address              — name_jw * addr_token_set
+19. min_name_address            — min(name_token_set, addr_token_set)
+20. max_name_address            — max(name_token_set, addr_token_set)
+21. has_both_addresses          — 1 if both S1 and S23 addresses >= 5 chars
+22. missing_address_asymmetry   — 1 if one address >= 10 chars while other < 3 chars
+23. exact_name_match            — 1 if normalized names are identical
+24. conflicting_digits          — 1 if both have numbers but d1 ∩ d2 is empty
+25. strong_name_and_number_match — 1 if name_token_set >= 0.85 and addr_num_overlap >= 0.5
+26. strong_name_but_number_conflict — 1 if name_token_set >= 0.85 and conflicting_digits == 1
+27. candidate_is_s3             — 1 if candidate starts with S3-
+28. candidate_rank              — 1-based rank of candidate within S1 candidate list
 
-  Country feature (1)
-  -------------------
-  country_match       — 1 if country_norm identical, 0 otherwise
-
-  Blocking score (1)
-  ------------------
-  blocking_score      — cosine similarity from the TF-IDF blocking step
-
-  Structural features (4)
-  -----------------------
-  name_len_s1         — len(name_norm) of S1 entity
-  name_len_s23        — len(name_norm) of S23 entity
-  name_len_ratio      — min/max of the above (0-1)
-  addr_len_ratio      — min/max of addr_norm lengths
-
-Total: 17 features.
+Total: 28 features.
 """
 
 import logging
-from typing import Dict, List, Tuple
+import re
+from typing import Dict, List, Tuple, Set
 
 import numpy as np
 import pandas as pd
@@ -50,7 +53,7 @@ try:
     _HAS_RAPIDFUZZ = True
 except ImportError:
     _HAS_RAPIDFUZZ = False
-    import difflib  # fallback (slower)
+    import difflib
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,18 @@ FEATURE_NAMES = [
     "name_len_s23",
     "name_len_ratio",
     "addr_len_ratio",
+    # Advanced 11
+    "name_x_address",
+    "min_name_address",
+    "max_name_address",
+    "has_both_addresses",
+    "missing_address_asymmetry",
+    "exact_name_match",
+    "conflicting_digits",
+    "strong_name_and_number_match",
+    "strong_name_but_number_conflict",
+    "candidate_is_s3",
+    "candidate_rank",
 ]
 
 
@@ -87,8 +102,6 @@ def _jaccard_tokens(a: str, b: str) -> float:
 
 
 def _jaccard_numbers(a: str, b: str) -> float:
-    """Jaccard over digit-sequences extracted from address strings."""
-    import re
     na = set(re.findall(r"\d+", a))
     nb = set(re.findall(r"\d+", b))
     if not na and not nb:
@@ -105,6 +118,12 @@ def _len_ratio(a: str, b: str) -> float:
     if la == 0 or lb == 0:
         return 0.0
     return min(la, lb) / max(la, lb)
+
+
+def _extract_digit_set(text: str) -> set:
+    if not text:
+        return set()
+    return set(re.findall(r"\d+", text))
 
 
 if _HAS_RAPIDFUZZ:
@@ -139,57 +158,19 @@ else:
             best = max(best, r)
         return best
     def _jaro_winkler(a, b):
-        # Simple Jaro (not Jaro-Winkler) without external lib
-        if a == b:
-            return 1.0
-        match_dist = max(len(a), len(b)) // 2 - 1
-        if match_dist < 0:
-            return 0.0
-        a_matches = [False] * len(a)
-        b_matches = [False] * len(b)
-        matches = 0
-        transpositions = 0
-        for i, c in enumerate(a):
-            start = max(0, i - match_dist)
-            end   = min(i + match_dist + 1, len(b))
-            for j in range(start, end):
-                if b_matches[j] or c != b[j]:
-                    continue
-                a_matches[i] = b_matches[j] = True
-                matches += 1
-                break
-        if matches == 0:
-            return 0.0
-        k = 0
-        for i in range(len(a)):
-            if not a_matches[i]:
-                continue
-            while not b_matches[k]:
-                k += 1
-            if a[i] != b[k]:
-                transpositions += 1
-            k += 1
-        jaro = (matches/len(a) + matches/len(b) + (matches - transpositions/2)/matches) / 3
-        prefix = 0
-        for i in range(min(4, len(a), len(b))):
-            if a[i] == b[i]:
-                prefix += 1
-            else:
-                break
-        return jaro + prefix * 0.1 * (1 - jaro)
+        return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-# ── Main feature function ─────────────────────────────────────────────────────
+# ── Feature Computation ───────────────────────────────────────────────────────
 
 def compute_features_for_pair(
     s1_name: str, s1_addr: str, s1_country: str,
     s23_name: str, s23_addr: str, s23_country: str,
+    s23_id: str = "",
+    cand_rank: int = 1,
     blocking_score: float = 0.0,
 ) -> List[float]:
-    """
-    Compute the 17 features for a single (S1, S23) pair.
-    All string inputs should already be normalized (from preprocess.py).
-    """
+    """Compute the 28 features for a single (S1, S23) pair."""
     # Name features
     f_name_ratio       = _ratio(s1_name, s23_name)
     f_name_token_sort  = _token_sort(s1_name, s23_name)
@@ -205,17 +186,34 @@ def compute_features_for_pair(
     f_addr_jaccard     = _jaccard_tokens(s1_addr, s23_addr)
     f_addr_num_overlap = _jaccard_numbers(s1_addr, s23_addr)
 
-    # Country
+    # Country & Blocking
     f_country_match    = float(s1_country == s23_country)
-
-    # Blocking score (already a float)
     f_blocking         = blocking_score
 
     # Structural
-    f_name_len_s1      = len(s1_name)
-    f_name_len_s23     = len(s23_name)
+    f_name_len_s1      = float(len(s1_name))
+    f_name_len_s23     = float(len(s23_name))
     f_name_len_ratio   = _len_ratio(s1_name, s23_name)
     f_addr_len_ratio   = _len_ratio(s1_addr, s23_addr)
+
+    # Advanced Interactions & Domain features
+    f_name_x_addr      = f_name_jw * f_addr_token_set
+    f_min_name_addr    = min(f_name_token_set, f_addr_token_set)
+    f_max_name_addr    = max(f_name_token_set, f_addr_token_set)
+
+    l1, l2             = len(s1_addr), len(s23_addr)
+    f_both_addr        = 1.0 if (l1 >= 5 and l2 >= 5) else 0.0
+    f_missing_asym     = 1.0 if ((l1 >= 10 and l2 < 3) or (l2 >= 10 and l1 < 3)) else 0.0
+    f_exact_name       = 1.0 if (s1_name and s1_name == s23_name) else 0.0
+
+    d1, d2             = _extract_digit_set(s1_addr), _extract_digit_set(s23_addr)
+    f_conflict_digits  = 1.0 if (d1 and d2 and not (d1 & d2)) else 0.0
+
+    f_strong_name_num   = 1.0 if (f_name_token_set >= 0.85 and f_addr_num_overlap >= 0.5) else 0.0
+    f_name_num_conflict = 1.0 if (f_name_token_set >= 0.85 and f_conflict_digits == 1.0) else 0.0
+
+    f_is_s3            = 1.0 if s23_id.startswith("S3-") else 0.0
+    f_cand_rank        = float(cand_rank)
 
     return [
         f_name_ratio, f_name_token_sort, f_name_token_set,
@@ -224,83 +222,47 @@ def compute_features_for_pair(
         f_addr_jaccard, f_addr_num_overlap,
         f_country_match,
         f_blocking,
-        float(f_name_len_s1), float(f_name_len_s23),
+        f_name_len_s1, f_name_len_s23,
         f_name_len_ratio, f_addr_len_ratio,
+        # Advanced 11
+        f_name_x_addr, f_min_name_addr, f_max_name_addr,
+        f_both_addr, f_missing_asym, f_exact_name,
+        f_conflict_digits, f_strong_name_num, f_name_num_conflict,
+        f_is_s3, f_cand_rank
     ]
 
 
 def build_feature_matrix(
-    pairs: List[Tuple],
+    pairs: List[Tuple[str, str]],
     s1_lookup: Dict,
     s23_lookup: Dict,
     blocking_scores: Dict[Tuple[str, str], float] = None,
+    candidate_ranks: Dict[Tuple[str, str], int] = None,
     n_jobs: int = -1,
 ) -> np.ndarray:
-    """
-    Build feature matrix for a list of (s1_id, s23_id) pairs.
-
-    Parameters
-    ----------
-    pairs         : list of (s1_id, s23_id) tuples
-    s1_lookup     : dict {entity_id: {name_norm, addr_norm, country_norm}}
-    s23_lookup    : dict {entity_id: {name_norm, addr_norm, country_norm}}
-    blocking_scores: optional dict {(s1_id, s23_id): cosine_score}
-    n_jobs        : number of parallel workers (-1 = all cores)
-
-    Returns
-    -------
-    np.ndarray of shape (n_pairs, 17)
-    """
+    """Build feature matrix (N, 28) for pairs."""
     if blocking_scores is None:
         blocking_scores = {}
+    if candidate_ranks is None:
+        candidate_ranks = {}
 
-    if n_jobs == 1 or len(pairs) < 1000:
-        # Single-threaded path
-        rows = []
-        for s1_id, s23_id in pairs:
-            s1  = s1_lookup[s1_id]
-            s23 = s23_lookup[s23_id]
-            score = blocking_scores.get((s1_id, s23_id), 0.0)
-            rows.append(compute_features_for_pair(
-                s1["name_norm"],  s1["addr_norm"],  s1["country_norm"],
-                s23["name_norm"], s23["addr_norm"], s23["country_norm"],
-                blocking_score=score,
-            ))
-        return np.array(rows, dtype=np.float32)
-
-    # Multi-threaded path via joblib
-    try:
-        from joblib import Parallel, delayed
-    except ImportError:
-        logger.warning("joblib not found — falling back to single-threaded feature computation")
-        return build_feature_matrix(pairs, s1_lookup, s23_lookup, blocking_scores, n_jobs=1)
-
-    def _compute_chunk(chunk):
-        rows = []
-        for s1_id, s23_id in chunk:
-            s1  = s1_lookup[s1_id]
-            s23 = s23_lookup[s23_id]
-            score = blocking_scores.get((s1_id, s23_id), 0.0)
-            rows.append(compute_features_for_pair(
-                s1["name_norm"],  s1["addr_norm"],  s1["country_norm"],
-                s23["name_norm"], s23["addr_norm"], s23["country_norm"],
-                blocking_score=score,
-            ))
-        return rows
-
-    n_workers = n_jobs if n_jobs > 0 else None
-    chunk_size = max(1000, len(pairs) // (4 * (n_workers or 4)))
-    chunks = [pairs[i:i+chunk_size] for i in range(0, len(pairs), chunk_size)]
-
-    all_rows = Parallel(n_jobs=n_jobs, prefer="threads")(
-        delayed(_compute_chunk)(chunk) for chunk in chunks
-    )
-    flat = [row for chunk in all_rows for row in chunk]
-    return np.array(flat, dtype=np.float32)
+    rows = []
+    for s1_id, s23_id in pairs:
+        s1  = s1_lookup[s1_id]
+        s23 = s23_lookup[s23_id]
+        b_score = blocking_scores.get((s1_id, s23_id), 0.0)
+        c_rank  = candidate_ranks.get((s1_id, s23_id), 1)
+        rows.append(compute_features_for_pair(
+            s1["name_norm"],  s1["addr_norm"],  s1["country_norm"],
+            s23["name_norm"], s23["addr_norm"], s23["country_norm"],
+            s23_id=s23_id,
+            cand_rank=c_rank,
+            blocking_score=b_score,
+        ))
+    return np.array(rows, dtype=np.float32)
 
 
 def build_lookup(df: pd.DataFrame) -> Dict:
-    """Convert preprocessed DataFrame to {entity_id: dict} for fast access."""
     return {
         row["entity_id"]: {
             "name_norm":    row["name_norm"],
