@@ -411,6 +411,12 @@ def run_audit_experiment(sample=5000, k_candidates=50, full_s23=False):
 
     # Save top_features.md summary
     save_top_features_report(fi_df)
+    
+    model_path = MODEL_DIR / "lgbm_model.pkl"
+    with open(model_path, "wb") as f:
+        pickle.dump((model, best_thr), f)
+    logger.info(f"Saved final trained model to {model_path}")
+    
     return model, best_thr, best_val_f05, hold_stats["macro_f05"]
 
 
@@ -480,6 +486,69 @@ def export_error_diagnostics(s1_df, s23_lookup, cands_dict, gt_dict, prob_map, t
     logger.info(f"Exported error CSVs (FP: {len(fps)}, FN: {len(fns)}, Singleton FM: {len(singletons_fm)}) to {ERROR_DIR}")
 
 
+def run_predict_experiment():
+    logger.info("=== Running Final Inference on Test Set ===")
+    from config import TEST_DIR, K_CANDIDATES
+    
+    # Load test data
+    s1_raw = pd.read_csv(TEST_DIR / "test_source1.tsv", sep="	", dtype=str)
+    s2_raw = pd.read_csv(TEST_DIR / "test_source2.tsv", sep="	", dtype=str)
+    s3_raw = pd.read_csv(TEST_DIR / "test_source3.tsv", sep="	", dtype=str)
+    
+    s1 = preprocess_df(s1_raw)
+    s2 = preprocess_df(s2_raw)
+    s3 = preprocess_df(s3_raw)
+    
+    cands_cache_file = OUTPUT_DIR / f"cands_test.pkl"
+    if cands_cache_file.exists():
+        with open(cands_cache_file, "rb") as f:
+            cands_test = pickle.load(f)
+    else:
+        cands_test = generate_candidates(s1, s2, s3, k=K_CANDIDATES)
+        with open(cands_cache_file, "wb") as f:
+            pickle.dump(cands_test, f)
+            
+    # Build features
+    s1_lookup = build_lookup(s1)
+    s23_lookup = build_lookup(pd.concat([s2, s3], ignore_index=True))
+    
+    pairs = []
+    for sid in s1["entity_id"]:
+        for c in cands_test.get(sid, []):
+            pairs.append((sid, c))
+            
+    feat_cache = OUTPUT_DIR / "features_test.pkl"
+    if feat_cache.exists():
+        with open(feat_cache, "rb") as f:
+            X_test = pickle.load(f)
+    else:
+        X_test = build_feature_matrix(pairs, s1_lookup, s23_lookup, n_jobs=-1)
+        with open(feat_cache, "wb") as f:
+            pickle.dump(X_test, f)
+            
+    # Load model
+    model_path = MODEL_DIR / "lgbm_model.pkl"
+    if not model_path.exists():
+        raise FileNotFoundError("Model not found. Run 'train' first.")
+    with open(model_path, "rb") as f:
+        model, best_thr = pickle.load(f)
+        
+    probs = model.predict(X_test)
+    prob_map = {(sid, cid): prob for (sid, cid), prob in zip(pairs, probs)}
+    
+    submission_rows = []
+    for sid in s1["entity_id"]:
+        cands = cands_test.get(sid, [])
+        matched = [c for c in cands if prob_map.get((sid, c), 0.0) >= best_thr]
+        submission_rows.append({
+            "source1_entity_id": sid,
+            "target_entity_ids": ",".join(matched)
+        })
+        
+    sub_df = pd.DataFrame(submission_rows)
+    sub_df.to_csv(OUTPUT_DIR / "submission.csv", index=False)
+    logger.info(f"Saved submission to {OUTPUT_DIR / 'submission.csv'}")
+
 def save_top_features_report(fi_df: pd.DataFrame):
     lines = [
         "# Top Features Ranking & Importance Analysis",
@@ -500,11 +569,16 @@ def save_top_features_report(fi_df: pd.DataFrame):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sample", type=int, default=5000)
+    parser.add_argument("mode", choices=["train", "predict"], nargs="?", default="train")
+    parser.add_argument("--sample", type=int, default=0, help="0 means full data")
     parser.add_argument("--full-s23", action="store_true", help="Do not sample S2/S3 (Realistic blocking test)")
     args = parser.parse_args()
     
-    if args.sample == 50000 and args.full_s23:
-        logger.info("CRITICAL CHECKPOINT: Running 50K S1 against FULL 10M S2/S3")
-        
-    run_audit_experiment(sample=args.sample, full_s23=args.full_s23)
+    if args.mode == "train":
+        if args.sample == 50000 and args.full_s23:
+            logger.info("CRITICAL CHECKPOINT: Running 50K S1 against FULL 10M S2/S3")
+        elif args.sample == 0:
+            logger.info("CRITICAL CHECKPOINT: Running FULL PIPELINE on 2.2M rows")
+        run_audit_experiment(sample=args.sample, full_s23=args.full_s23)
+    elif args.mode == "predict":
+        run_predict_experiment()
