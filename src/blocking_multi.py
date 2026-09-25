@@ -76,29 +76,29 @@ def _batched_topk(
     s1_batch  = S1_BATCH_SIZE
     s23_chunk = S23_CHUNK_SIZE
 
+    try:
+        import cupy as cp
+        from cupyx.scipy import sparse as cusparse
+        HAS_CUPY = True
+    except ImportError:
+        HAS_CUPY = False
+
     for s23_start in range(0, n23, s23_chunk):
         s23_end   = min(s23_start + s23_chunk, n23)
         chunk_mat = s23_mat[s23_start:s23_end]
         chunk_ids = s23_ids[s23_start:s23_end]
 
+        if HAS_CUPY:
+            chunk_mat_gpu = cusparse.csr_matrix(chunk_mat)
+
         for s1_start in range(0, n1, s1_batch):
             s1_end = min(s1_start + s1_batch, n1)
             q_mat  = s1_mat[s1_start:s1_end]
 
-            try:
-                import cupy as cp
-                from cupyx.scipy import sparse as cusparse
-                HAS_CUPY = True
-            except ImportError:
-                HAS_CUPY = False
-
             if HAS_CUPY:
-                q_mat_gpu = cusparse.csr_matrix(q_mat)
-                chunk_mat_gpu = cusparse.csr_matrix(chunk_mat)
-                sim_block_gpu = q_mat_gpu.dot(chunk_mat_gpu.T)
-                if cusparse.issparse(sim_block_gpu):
-                    sim_block_gpu = sim_block_gpu.toarray()
-                sim_block = cp.asnumpy(sim_block_gpu).astype(np.float32)
+                q_mat_dense_gpu = cp.array(q_mat.toarray(), dtype=np.float32)
+                sim_block_gpu = chunk_mat_gpu.dot(q_mat_dense_gpu.T).T
+                sim_block = cp.asnumpy(sim_block_gpu)
             else:
                 sim_block = q_mat.dot(chunk_mat.T)
                 if sp.issparse(sim_block):
