@@ -85,10 +85,25 @@ def _batched_topk(
             s1_end = min(s1_start + s1_batch, n1)
             q_mat  = s1_mat[s1_start:s1_end]
 
-            sim_block = q_mat.dot(chunk_mat.T)
-            if sp.issparse(sim_block):
-                sim_block = sim_block.toarray()
-            sim_block = sim_block.astype(np.float32)
+            try:
+                import cupy as cp
+                from cupyx.scipy import sparse as cusparse
+                HAS_CUPY = True
+            except ImportError:
+                HAS_CUPY = False
+
+            if HAS_CUPY:
+                q_mat_gpu = cusparse.csr_matrix(q_mat)
+                chunk_mat_gpu = cusparse.csr_matrix(chunk_mat)
+                sim_block_gpu = q_mat_gpu.dot(chunk_mat_gpu.T)
+                if cusparse.issparse(sim_block_gpu):
+                    sim_block_gpu = sim_block_gpu.toarray()
+                sim_block = cp.asnumpy(sim_block_gpu).astype(np.float32)
+            else:
+                sim_block = q_mat.dot(chunk_mat.T)
+                if sp.issparse(sim_block):
+                    sim_block = sim_block.toarray()
+                sim_block = sim_block.astype(np.float32)
 
             for local_i in range(s1_end - s1_start):
                 global_i = s1_start + local_i

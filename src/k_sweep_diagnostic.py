@@ -116,6 +116,12 @@ def run_k_experiment(
 
     params = dict(LGBM_PARAMS)
     params.pop("n_estimators", None)
+    try:
+        import cupy as cp
+        params["device_type"] = "gpu"
+    except ImportError:
+        pass
+
     model = lgb.train(
         params,
         dtrain,
@@ -159,7 +165,7 @@ def run_k_experiment(
 
 def main():
     parser = argparse.ArgumentParser(description="K-sweep blocking diagnostic")
-    parser.add_argument("--sample", type=int, default=5000,
+    parser.add_argument("--sample", type=int, default=50000,
                         help="Number of S1 entities for dev run")
     parser.add_argument("--ks", nargs="+", type=int,
                         default=[10, 20, 30, 50, 100],
