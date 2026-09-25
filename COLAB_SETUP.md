@@ -40,7 +40,7 @@ My Drive/
 ## Step 2: Upload the Notebook to Colab
 
 1. Go to [colab.research.google.com](https://colab.research.google.com)
-2. File → Upload notebook → select `COLAB_PIPELINE.ipynb`
+2. File → Upload notebook → select `COLAB_PIPELINE_GPU.ipynb` (or `COLAB_PIPELINE.ipynb` for the CPU fallback)
 3. Save a copy to Drive: File → Save a copy in Drive
    - Suggested location: `My Drive/AmazonML/`
 
@@ -49,12 +49,11 @@ My Drive/
 ## Step 3: Configure the Runtime
 
 1. Runtime → Change runtime type
-2. Hardware accelerator: **None** (CPU)  
-   *(TF-IDF + LightGBM don't use GPU; CPU gives more RAM)*
+2. Hardware accelerator: **T4 GPU**
+   *(The GPU notebook uses CuPy to accelerate blocking matrix multiplication and LightGBM for training)*
 3. Runtime shape:
-   - **Standard** (free): 12 GB RAM — works but slow
-   - **High-RAM** (Colab Pro): 25 GB RAM — recommended
-   - **A100** (Colab Pro+): 40 GB RAM — fastest
+   - **Standard** (free): 12 GB RAM + T4 GPU — fast and sufficient for the 50K experiment
+   - **High-RAM** (Colab Pro): 25 GB RAM + T4 GPU — recommended for the full 2.2M dataset run
 
 ---
 
@@ -89,31 +88,33 @@ Continue normally
 
 ---
 
-## Estimated Runtimes
+## Estimated Runtimes (Using T4 GPU)
 
-### Free Colab (12 GB RAM)
+The GPU acceleration reduces blocking time dramatically.
+
+### Free Colab (12 GB RAM + T4 GPU)
 | Step | Time |
 |------|------|
 | Setup + EDA | 5 min |
 | Preprocessing | 15-20 min |
-| **Train blocking (US + India)** | **6-8 hours** |
+| **Train blocking (US + India)** | **~10-20 min** |
 | Feature engineering | 2-3 hours |
-| LightGBM training | 20-30 min |
-| **Test blocking (US + India + France)** | **5-7 hours** |
+| LightGBM training | ~5 min |
+| **Test blocking (US + India + France)** | **~10 min** |
 | Test prediction | 1-2 hours |
-| **Total** | **~15-20 hours** |
+| **Total** | **~4-6 hours** (down from 15-20 hours on CPU) |
 
-### Colab Pro (25 GB RAM)
+### Colab Pro (25 GB RAM + T4 GPU)
 | Step | Time |
 |------|------|
 | Setup + EDA | 3 min |
 | Preprocessing | 8-10 min |
-| **Train blocking** | **3-4 hours** |
+| **Train blocking** | **~5-10 min** |
 | Feature engineering | 1-2 hours |
-| LightGBM training | 10-15 min |
-| **Test blocking** | **2-3 hours** |
+| LightGBM training | ~3 min |
+| **Test blocking** | **~5 min** |
 | Test prediction | 45-60 min |
-| **Total** | **~7-10 hours** |
+| **Total** | **~2-3 hours**
 
 ---
 
@@ -157,13 +158,10 @@ python src/run_pipeline.py train --sample 5000
 ```
 Takes ~4 minutes. Good for testing code changes.
 
-**Option B**: In Colab, modify Cell 10 to sample S1:
+**Option B**: In Colab, the GPU notebook is already configured to sample 50K S1 records in Cell 10 for rapid experimentation:
 ```python
-# Add this before run_full_blocking(...):
-s1_train_sample = s1_train.sample(n=5000, random_state=42)
-train_candidates = run_full_blocking(
-    s1_train_sample, s2_train, s3_train, K_CANDIDATES, TRAIN_BLOCK_DIR
-)
+# Cell 10 in COLAB_PIPELINE_GPU.ipynb
+s1_train = s1_train.sample(n=min(50000, len(s1_train)), random_state=42)
 ```
 
 **Option C**: Run K-sweep on 5K sample first
@@ -180,7 +178,7 @@ train_candidates = run_full_blocking(
 |-------|-----|
 | `ModuleNotFoundError: config` | Re-run Cell 6 (sys.path patch) |
 | `FileNotFoundError: train_source1.tsv` | Re-run Cell 5 (data extraction) |
-| `CUDA/GPU error` | Irrelevant — pipeline uses CPU only |
+| `cupy` or GPU errors | Ensure you selected **T4 GPU** in Runtime settings |
 | OOM during blocking | Reduce `S23_CHUNK_SIZE` in Cell 4 to `100_000` |
 | `KeyError: entity_id` | Check TSV header — might have different column names |
 | Drive quota exceeded | Delete old `.pkl` checkpoint files from `AmazonML/cache/` |
