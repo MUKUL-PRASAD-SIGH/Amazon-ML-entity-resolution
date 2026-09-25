@@ -44,11 +44,14 @@ logger = logging.getLogger(__name__)
 # ── TF-IDF Helper ─────────────────────────────────────────────────────────────
 
 def _build_vectorizer(texts: List[str]) -> Tuple[TfidfVectorizer, sp.csr_matrix]:
+    n_docs = len(texts)
+    # Dynamic min_df scaling for 1M+ row datasets to keep vocabulary memory bounded
+    min_df = max(TFIDF_MIN_DF, 5) if n_docs > 500_000 else TFIDF_MIN_DF
     vec = TfidfVectorizer(
         analyzer=TFIDF_ANALYZER,
         ngram_range=TFIDF_NGRAM_RANGE,
         max_features=TFIDF_MAX_FEATURES,
-        min_df=TFIDF_MIN_DF,
+        min_df=min_df,
         sublinear_tf=True,
         strip_accents=None,
         norm="l2",
