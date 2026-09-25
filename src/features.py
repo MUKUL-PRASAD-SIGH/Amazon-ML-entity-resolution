@@ -75,6 +75,10 @@ FEATURE_NAMES = [
     "name_len_s23",
     "name_len_ratio",
     "addr_len_ratio",
+    # Full Document Context Features
+    "doc_ratio",
+    "doc_token_set",
+    "doc_jw",
     # Advanced 11
     "name_x_address",
     "min_name_address",
@@ -201,6 +205,13 @@ def compute_features_for_pair(
     f_name_len_ratio   = _len_ratio(s1_name, s23_name)
     f_addr_len_ratio   = _len_ratio(s1_addr, s23_addr)
 
+    # Full Document Context (name + addr + country)
+    doc1 = f"{s1_name} {s1_addr} {s1_country}".strip()
+    doc2 = f"{s23_name} {s23_addr} {s23_country}".strip()
+    f_doc_ratio = _ratio(doc1, doc2)
+    f_doc_token_set = _token_set(doc1, doc2)
+    f_doc_jw = _jaro_winkler(doc1, doc2)
+
     # Advanced Interactions & Domain features
     f_name_x_addr      = f_name_jw * f_addr_token_set
     f_min_name_addr    = min(f_name_token_set, f_addr_token_set)
@@ -237,6 +248,8 @@ def compute_features_for_pair(
         f_blocking,
         f_name_len_s1, f_name_len_s23,
         f_name_len_ratio, f_addr_len_ratio,
+        # Full Document Context
+        f_doc_ratio, f_doc_token_set, f_doc_jw,
         # Advanced 11
         f_name_x_addr, f_min_name_addr, f_max_name_addr,
         f_both_addr, f_missing_asym, f_exact_name,
