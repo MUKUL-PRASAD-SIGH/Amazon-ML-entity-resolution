@@ -25,7 +25,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent))
+# Add the src directory to sys.path regardless of where the script is executed
+_src_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(_src_dir))
+if _src_dir.name != "src":
+    sys.path.insert(0, str(_src_dir / "src"))
+sys.path.insert(0, str(_src_dir.parent / "src"))
 
 from config import (
     LGBM_PARAMS, EARLY_STOPPING_ROUNDS, MODEL_DIR, TRAIN_DIR,
