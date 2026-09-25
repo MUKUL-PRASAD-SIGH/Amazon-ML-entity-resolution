@@ -1,0 +1,45 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.Python
+pip-wheel-metadata/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── Data — raw TSV files are large; keep them out of Git ─────────────────────
+# To share data, upload to Google Drive and point COLAB_PIPELINE.ipynb at it.
+dataset/train/*.tsv
+dataset/test/*.tsv
+
+# ── Model artifacts ───────────────────────────────────────────────────────────
+# Keep k_sweep_results.tsv (small, informative) but ignore large model binaries
+models/*.pkl
+
+# ── Output TSVs ───────────────────────────────────────────────────────────────
+output/
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# ── Colab cache (Drive-side, never on disk here) ──────────────────────────────
+cache/

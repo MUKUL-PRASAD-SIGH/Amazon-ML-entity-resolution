@@ -1,0 +1,17 @@
+# Entity Resolution Pipeline — Python Dependencies
+# Pin major versions; adjust patch versions as needed.
+
+# Core ML
+lightgbm>=4.3.0
+scikit-learn>=1.4.0
+numpy>=1.26.0
+scipy>=1.13.0
+
+# Data handling
+pandas>=2.2.0
+
+# Fast string similarity (C extension — ~30x faster than python-Levenshtein)
+rapidfuzz>=3.8.0
+
+# Parallelism
+joblib>=1.4.0
