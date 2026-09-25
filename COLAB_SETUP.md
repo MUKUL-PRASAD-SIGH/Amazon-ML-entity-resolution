@@ -3,37 +3,20 @@
 
 ---
 
-## Step 1: Upload Code to Google Drive
+## Step 1: Verify Google Drive Folder
 
-Create this folder structure in your Google Drive:
+Since you uploaded the exact project folder to Drive, your Drive structure should look exactly like this:
 
 ```
 My Drive/
-└── AmazonML/
-    ├── student_resource.zip     ← competition data ZIP
-    └── code/
-        ├── src/                 ← copy your entire src/ folder here
-        │   ├── config.py
-        │   ├── preprocess.py
-        │   ├── blocking.py
-        │   ├── features.py
-        │   ├── train_model.py
-        │   ├── predict.py
-        │   ├── evaluate.py
-        │   ├── run_pipeline.py
-        │   └── k_sweep_diagnostic.py
-        └── utils/
-            └── validate_submission.py
+└── Amazon-ML-entity-resolution/
+    ├── dataset/               ← MUST contain train/ and test/ folders with TSVs
+    ├── src/                   ← source code
+    ├── utils/                 ← validation script
+    └── COLAB_PIPELINE_GPU.ipynb
 ```
 
-**How to upload:**
-1. Go to [drive.google.com](https://drive.google.com)
-2. Create folder: `AmazonML` → inside it, create `code` → inside that, create `src` and `utils`
-3. Upload each `.py` file from your `src/` folder into `AmazonML/code/src/`
-4. Upload `utils/validate_submission.py` into `AmazonML/code/utils/`
-5. Upload `student_resource.zip` directly into `AmazonML/`
-
-> **Tip**: You can zip the `src/` folder and extract in Colab, but uploading individual files is simpler.
+> **Note**: You don't need the `student_resource.zip` anymore as long as the extracted TSV files are inside the `dataset/` folder on Drive.
 
 ---
 
