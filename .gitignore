@@ -28,9 +28,14 @@ dataset/test/*.tsv
 # ── Model artifacts ───────────────────────────────────────────────────────────
 # Keep k_sweep_results.tsv (small, informative) but ignore large model binaries
 models/*.pkl
-
+dataset
 # ── Output TSVs ───────────────────────────────────────────────────────────────
 output/
+
+# ── Blocking pipeline outputs ─────────────────────────────────────────────────
+matching_candidates.csv
+progress.json
+*.parquet
 
 # ── OS / editor ───────────────────────────────────────────────────────────────
 .DS_Store
