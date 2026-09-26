@@ -1,8 +1,9 @@
-"""Memory-conscious candidate generation for the entity-resolution pipeline.
+"""Memory-efficient blocking and candidate-pair generation.
 
-The module never builds a TF-IDF matrix for the complete reference corpus.
-Cheap inverted indexes produce bounded name blocks first; character TF-IDF is
-then evaluated only inside those blocks, one Source 1 batch at a time.
+The implementation keeps Source 2 and Source 3 separate and never creates a
+combined reference dataframe or a corpus-sized TF-IDF matrix. Inverted indexes
+first identify bounded name blocks. Character TF-IDF is then fitted only for
+those block rows, in configurable reference chunks.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import time
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import DefaultDict, Dict, Iterable, List, Mapping, Sequence
+from typing import DefaultDict, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -33,12 +34,13 @@ STOPWORDS = frozenset(
 )
 _NON_WORD = re.compile(r"[^\w\s]", flags=re.UNICODE)
 _SPACES = re.compile(r"\s+")
-DEFAULT_OUTPUT = Path("matching_candidates.csv")
-DEFAULT_PROGRESS = Path("progress.json")
+DEFAULT_OUTPUT = Path("output/candidate_pairs.tsv")
+DEFAULT_PROGRESS = Path("output/progress.json")
+Posting = Tuple[int, int]
 
 
 def normalize_name(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with deterministic Unicode-normalized ``name_norm`` values."""
+    """Return a copy with Unicode-normalized ``name_norm`` values."""
     result = df.copy()
     source = result["name_norm"] if "name_norm" in result else result["business_name"]
 
@@ -58,32 +60,37 @@ def _tokens(name: str) -> List[str]:
 
 def build_blocks(
     df: pd.DataFrame,
-    prefix_lengths: Sequence[int] = (3, 4, 5),
+    source_number: int = 0,
+    prefix_length: int = 4,
     rare_token_max_frequency: int = 200,
     max_postings: int = 5000,
-) -> Dict[str, Mapping[str, Sequence[int]]]:
-    """Build bounded exact-name, prefix, and rare-token inverted indexes."""
-    names = df["name_norm"].fillna("").astype(str).tolist()
-    exact: DefaultDict[str, List[int]] = defaultdict(list)
-    prefixes: DefaultDict[str, List[int]] = defaultdict(list)
+) -> Dict[str, Mapping[str, Sequence[Posting]]]:
+    """Build bounded exact-name, prefix, and rare-token posting lists.
+
+    A posting is ``(source_number, row_number)`` so Source 2 and Source 3 can
+    be queried independently without concatenating their dataframes.
+    """
+    if prefix_length < 1 or max_postings < 1:
+        raise ValueError("prefix_length and max_postings must be positive")
+    names = df["name_norm"].fillna("").astype(str)
+    exact: DefaultDict[str, List[Posting]] = defaultdict(list)
+    prefixes: DefaultDict[str, List[Posting]] = defaultdict(list)
     token_frequency: Counter[str] = Counter()
-    row_tokens: List[List[str]] = []
+
     for name in names:
-        tokens = _tokens(name)
-        row_tokens.append(tokens)
-        token_frequency.update(set(tokens))
-    rare_tokens: DefaultDict[str, List[int]] = defaultdict(list)
+        token_frequency.update(set(_tokens(name)))
+    rare_tokens: DefaultDict[str, List[Posting]] = defaultdict(list)
     for row_number, name in enumerate(names):
+        posting = (source_number, row_number)
         if name:
             if len(exact[name]) < max_postings:
-                exact[name].append(row_number)
-            for length in prefix_lengths:
-                prefix = name[:length]
-                if len(prefixes[prefix]) < max_postings:
-                    prefixes[prefix].append(row_number)
-        for token in set(row_tokens[row_number]):
+                exact[name].append(posting)
+            prefix = name[:prefix_length]
+            if len(prefixes[prefix]) < max_postings:
+                prefixes[prefix].append(posting)
+        for token in set(_tokens(name)):
             if token_frequency[token] <= rare_token_max_frequency and len(rare_tokens[token]) < max_postings:
-                rare_tokens[token].append(row_number)
+                rare_tokens[token].append(posting)
     return {"exact": dict(exact), "prefix": dict(prefixes), "rare": dict(rare_tokens)}
 
 
@@ -95,42 +102,48 @@ def _memory_gb() -> float:
         return 0.0
 
 
+def _id_column(df: pd.DataFrame) -> str:
+    for column in ("entity_id", "source1_entity_id", "source2_entity_id", "source3_entity_id"):
+        if column in df.columns:
+            return column
+    raise KeyError("Input dataframe must contain entity_id or a source-specific entity ID column")
+
+
 def _log_progress(batch: int, total_batches: int, started: float, pairs: int) -> None:
     elapsed = max(time.monotonic() - started, 1e-6)
     completed = batch / max(total_batches, 1)
-    eta = elapsed / max(completed, 1e-9) * (1 - completed)
+    eta_seconds = elapsed / max(completed, 1e-9) * (1 - completed)
     disk_gb = shutil.disk_usage(Path.cwd()).used / 1024**3
     LOGGER.info(
-        "Batch %d/%d (%.1f%%), ETA %.1f min, RAM %.2f GB, disk %.2f GB, candidate pairs %d",
-        batch, total_batches, completed * 100, eta / 60, _memory_gb(), disk_gb, pairs,
+        "Batch %d/%d | %.1f%% | ETA %.1f min | RAM %.2f GB | disk %.2f GB | pairs %d",
+        batch, total_batches, completed * 100, eta_seconds / 60, _memory_gb(), disk_gb, pairs,
     )
 
 
 def save_candidate_pairs(
-    rows: Iterable[Mapping[str, object]],
+    rows: Iterable[Tuple[object, object]],
     output_path: str | Path = DEFAULT_OUTPUT,
     append: bool = True,
 ) -> int:
-    """Append candidate rows with correct CSV quoting and return rows written."""
+    """Append ``(source1_id, reference_id)`` pairs to the required TSV."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    rows = list(rows)
+    pair_rows = list(rows)
     mode = "a" if append else "w"
     write_header = not append or not path.exists() or path.stat().st_size == 0
     with path.open(mode, newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         if write_header:
-            writer.writerow(["source1_entity_id", "candidate_entity_ids"])
-        for row in rows:
-            writer.writerow([row["source1_entity_id"], row["candidate_entity_ids"]])
-    return len(rows)
+            writer.writerow(("source1_entity_id", "source2_entity_id"))
+        writer.writerows(pair_rows)
+    return len(pair_rows)
 
 
 def resume_progress(
     progress_path: str | Path = DEFAULT_PROGRESS,
     output_path: str | Path = DEFAULT_OUTPUT,
 ) -> int:
-    """Return the next batch index, or zero when no compatible checkpoint exists."""
+    """Return the next Source 1 batch index from a matching checkpoint."""
     path = Path(progress_path)
     if not path.exists():
         return 0
@@ -144,43 +157,47 @@ def resume_progress(
 
 
 def _write_progress(path: Path, batch: int, output_path: Path, pairs: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps({
         "last_processed_batch": batch,
         "output_path": str(output_path),
-        "candidate_pairs": pairs,
+        "candidate_pairs_written": pairs,
     }, indent=2), encoding="utf-8")
     temporary.replace(path)
 
 
-def _tfidf_block_candidates(
+def _tfidf_candidates(
     query_name: str,
-    reference: pd.DataFrame,
-    positions: Sequence[int],
+    references: Mapping[int, pd.DataFrame],
+    postings: Sequence[Posting],
     top_k: int,
     chunk_size: int,
-) -> List[int]:
-    if not query_name or not positions:
-        return []
-    scored: List[tuple[float, int]] = []
-    for offset in range(0, len(positions), chunk_size):
-        chunk_positions = positions[offset:offset + chunk_size]
-        names = reference.iloc[list(chunk_positions)]["name_norm"].fillna("").astype(str).tolist()
-        vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), dtype=np.float32)
-        matrix = vectorizer.fit_transform([query_name, *names])
-        scores = cosine_similarity(matrix[0:1], matrix[1:]).ravel()
-        scored.extend(
-            (float(score), chunk_positions[index])
-            for index, score in enumerate(scores)
-            if score > 0
-        )
-        del matrix, vectorizer, names, scores
-        gc.collect()
+) -> List[Posting]:
+    """Score only block postings, using sparse TF-IDF per reference chunk."""
+    scored: List[Tuple[float, Posting]] = []
+    for source_number in (0, 1):
+        source_positions = [row for source, row in postings if source == source_number]
+        for offset in range(0, len(source_positions), chunk_size):
+            positions = source_positions[offset:offset + chunk_size]
+            if not positions:
+                continue
+            names = references[source_number].iloc[positions]["name_norm"].fillna("").astype(str).tolist()
+            vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), dtype=np.float32)
+            matrix = vectorizer.fit_transform([query_name, *names])
+            scores = cosine_similarity(matrix[0:1], matrix[1:]).ravel()
+            scored.extend(
+                (float(score), (source_number, position))
+                for position, score in zip(positions, scores)
+                if score > 0
+            )
+            del names, vectorizer, matrix, scores
+            gc.collect()
     scored.sort(key=lambda item: (-item[0], item[1]))
-    return [position for _, position in scored[:top_k]]
+    return [posting for _, posting in scored[:top_k]]
 
 
-def generate_candidates(
+def generate_candidate_pairs(
     s1_df: pd.DataFrame,
     s2_df: pd.DataFrame,
     s3_df: pd.DataFrame,
@@ -190,52 +207,63 @@ def generate_candidates(
     output_path: str | Path = DEFAULT_OUTPUT,
     progress_path: str | Path = DEFAULT_PROGRESS,
 ) -> None:
-    """Generate and checkpoint up to ``top_k`` unioned candidates per S1 row."""
-    if batch_size < 1 or chunk_size < 1 or top_k < 1:
-        raise ValueError("batch_size, chunk_size, and top_k must be positive")
+    """Generate at most ``top_k`` unique candidate pairs per Source 1 row."""
+    if batch_size < 1 or not 25000 <= chunk_size <= 50000 or top_k < 1:
+        raise ValueError("batch_size/top_k must be positive and chunk_size must be 25000-50000")
     s1, s2, s3 = (normalize_name(frame) for frame in (s1_df, s2_df, s3_df))
-    references = pd.concat([s2, s3], ignore_index=True, copy=False)
-    ids = references["entity_id"].astype(str).tolist()
-    blocks = build_blocks(references)
+    references = {0: s2, 1: s3}
+    reference_ids = {
+        source: references[source][_id_column(references[source])].astype(str).tolist()
+        for source in references
+    }
+    blocks = {
+        source: build_blocks(references[source], source_number=source)
+        for source in references
+    }
+    s1_ids = s1[_id_column(s1)].astype(str)
     total_batches = (len(s1) + batch_size - 1) // batch_size
     output = Path(output_path)
     progress = Path(progress_path)
     start_batch = resume_progress(progress, output)
     if start_batch == 0 and output.exists() and output.stat().st_size:
         raise FileExistsError(f"{output} exists without a matching checkpoint; remove it to restart")
+
     started = time.monotonic()
-    total_pairs = 0
+    pairs_written = 0
     for batch_number in range(start_batch, total_batches):
-        batch = s1.iloc[batch_number * batch_size:(batch_number + 1) * batch_size]
-        rows = []
-        for source_id, name in zip(batch["entity_id"].astype(str), batch["name_norm"].astype(str)):
-            positions = set(blocks["exact"].get(name, ()))
-            for length in (3, 4, 5):
-                positions.update(blocks["prefix"].get(name[:length], ()))
-            for token in set(_tokens(name)):
-                positions.update(blocks["rare"].get(token, ()))
-            ranked = _tfidf_block_candidates(name, references, sorted(positions), top_k, chunk_size)
-            candidates = list(dict.fromkeys(ids[position] for position in ranked))
-            for position in sorted(positions):
-                candidate_id = ids[position]
-                if candidate_id not in candidates:
-                    candidates.append(candidate_id)
-                if len(candidates) == top_k:
+        begin = batch_number * batch_size
+        end = min(begin + batch_size, len(s1))
+        rows: List[Tuple[str, str]] = []
+        for row_number in range(begin, end):
+            name = str(s1.iloc[row_number]["name_norm"])
+            postings: set[Posting] = set()
+            for source in references:
+                source_blocks = blocks[source]
+                postings.update(source_blocks["exact"].get(name, ()))
+                postings.update(source_blocks["prefix"].get(name[:4], ()))
+                for token in set(_tokens(name)):
+                    postings.update(source_blocks["rare"].get(token, ()))
+            ranked = _tfidf_candidates(name, references, sorted(postings), top_k, chunk_size)
+            candidates = list(dict.fromkeys(ranked))
+            for posting in sorted(postings):
+                if posting not in candidates:
+                    candidates.append(posting)
+                if len(candidates) >= top_k:
                     break
-            rows.append({"source1_entity_id": source_id, "candidate_entity_ids": ",".join(candidates[:top_k])})
-        total_pairs += sum(len(str(row["candidate_entity_ids"]).split(",")) for row in rows if row["candidate_entity_ids"])
-        save_candidate_pairs(rows, output, append=True)
-        _write_progress(progress, batch_number, output, total_pairs)
-        _log_progress(batch_number + 1, total_batches, started, total_pairs)
-        del batch, rows
+            source_id = s1_ids.iloc[row_number]
+            rows.extend((source_id, reference_ids[source][position]) for source, position in candidates[:top_k])
+        pairs_written += save_candidate_pairs(rows, output, append=True)
+        _write_progress(progress, batch_number, output, pairs_written)
+        _log_progress(batch_number + 1, total_batches, started, pairs_written)
+        del rows
         gc.collect()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source1", required=True, type=Path)
-    parser.add_argument("--source2", required=True, type=Path)
-    parser.add_argument("--source3", required=True, type=Path)
+    parser.add_argument("--source1", type=Path, default=Path("preprocessed/source1.parquet"))
+    parser.add_argument("--source2", type=Path, default=Path("preprocessed/source2.parquet"))
+    parser.add_argument("--source3", type=Path, default=Path("preprocessed/source3.parquet"))
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--progress", type=Path, default=DEFAULT_PROGRESS)
     parser.add_argument("--batch-size", type=int, default=1000)
@@ -246,7 +274,9 @@ def main() -> None:
     s1 = pd.read_parquet(args.source1)
     s2 = pd.read_parquet(args.source2)
     s3 = pd.read_parquet(args.source3)
-    generate_candidates(s1, s2, s3, args.batch_size, args.chunk_size, args.top_k, args.output, args.progress)
+    generate_candidate_pairs(
+        s1, s2, s3, args.batch_size, args.chunk_size, args.top_k, args.output, args.progress
+    )
 
 
 if __name__ == "__main__":
