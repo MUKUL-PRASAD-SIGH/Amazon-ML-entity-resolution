@@ -43,3 +43,6 @@ Thumbs.db
 
 # ── Colab cache (Drive-side, never on disk here) ──────────────────────────────
 cache/
+
+# ── Data splits ───────────────────────────────────────────────────────────────
+person*/
