@@ -7,9 +7,16 @@ from pathlib import Path
 # TRAIN_DIR = Path("/content/drive/MyDrive/AmazonML/dataset/train")
 # SPLIT_DIR = Path("/content/drive/MyDrive/AmazonML/splits")
 
-# Using local paths for the workspace
-TRAIN_DIR = Path("dataset/train")
-SPLIT_DIR = Path("splits")
+import os
+
+# Check if we are running in Colab by seeing if /content/drive exists
+if os.path.exists("/content/drive"):
+    BASE_DIR = Path("/content/drive/MyDrive/Amazon-ML-entity-resolution")
+else:
+    BASE_DIR = Path(".")
+
+TRAIN_DIR = BASE_DIR / "dataset" / "train"
+SPLIT_DIR = BASE_DIR / "splits"
 
 SPLIT_DIR.mkdir(parents=True, exist_ok=True)
 
